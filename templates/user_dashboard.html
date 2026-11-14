@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhishShield AI - User Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="brand-icon">
+                <img src="{{ url_for('static', filename='PhishShield AI Cybersecurity Logo.png') }}" alt="PhishShield AI Logo">
+            </div>
+            <div class="brand-text">
+                <h2>PhishShield</h2>
+                <span>AI Security</span>
+            </div>
+        </div>
+
+        <p class="menu-label">USER PANEL</p>
+        <a href="#dashboard" class="menu active">▦ Dashboard</a>
+        <a href="#scanner" class="menu">⌕ Scanner</a>
+        <a href="#history" class="menu">◷ Scan History</a>
+        <a href="{{ url_for('logout') }}" class="menu logout">↩ Logout</a>
+
+        <div class="sidebar-bottom">
+            <div class="status">
+                <span class="online"></span>
+                User Mode Active
+            </div>
+            <small>Login: {{ username }}</small>
+        </div>
+    </aside>
+
+    <main class="main-content">
+        <header class="topbar">
+            <div>
+                <h1>User Dashboard</h1>
+                <p>Gunakan fitur deteksi phishing sesuai kebutuhan Anda.</p>
+            </div>
+            <div class="profile">
+                <div class="avatar">U</div>
+                <span>{{ username }}</span>
+            </div>
+        </header>
+
+        <section id="dashboard">
+            <div class="welcome">
+                <div>
+                    <span class="eyebrow">USER ACCESS</span>
+                    <h2>Selamat Datang, {{ username }}</h2>
+                    <p>Anda dapat memindai URL dan email phishing secara terbatas.</p>
+                </div>
+                <div class="shield-art">🛡️</div>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <span>Total Scans</span>
+                    <h2 id="totalScans">0</h2>
+                    <small>Semua hasil Anda</small>
+                </div>
+                <div class="stat-card">
+                    <span>High Risk</span>
+                    <h2 id="highRisk" class="red">0</h2>
+                    <small>Ancaman potensial</small>
+                </div>
+                <div class="stat-card">
+                    <span>Suspicious</span>
+                    <h2 id="suspicious" class="yellow">0</h2>
+                    <small>Perlu review</small>
+                </div>
+                <div class="stat-card">
+                    <span>Safe</span>
+                    <h2 id="safeScans" class="green">0</h2>
+                    <small>Tidak terindikasi</small>
+                </div>
+            </div>
+        </section>
+
+        <section id="scanner" class="scanner-section">
+            <div class="section-heading">
+                <div>
+                    <h2>Threat Scanner</h2>
+                    <p>Pilih jenis pemeriksaan yang ingin Anda lakukan.</p>
+                </div>
+            </div>
+
+            <div class="scanner-card">
+                <div class="tabs">
+                    <button class="tab active" data-type="url" onclick="changeType('url')">🔗 URL Scanner</button>
+                    <button class="tab" data-type="email" onclick="changeType('email')">✉ Email Scanner</button>
+                </div>
+
+                <div class="input-area">
+                    <label id="inputLabel">Website URL</label>
+                    <textarea id="scanInput" placeholder="https://example.com" rows="4"></textarea>
+                    <div class="input-hint" id="inputHint">Masukkan URL lengkap dengan https://</div>
+                    <button class="scan-button" id="scanButton" onclick="startScan()">Analyze Threat →</button>
+                </div>
+            </div>
+
+            <div id="result" class="result-card hidden">
+                <div class="result-header">
+                    <div>
+                        <span class="eyebrow">ANALYSIS RESULT</span>
+                        <h2>Scan Completed</h2>
+                    </div>
+                    <span id="riskBadge" class="risk-badge"></span>
+                </div>
+
+                <div class="score-container">
+                    <div class="score-number">
+                        <strong id="riskScore">0</strong>
+                        <span>/ 100</span>
+                    </div>
+                    <div class="score-track">
+                        <div id="scoreBar" class="score-fill"></div>
+                    </div>
+                    <small>Risk Score</small>
+                </div>
+
+                <h3>Security Findings</h3>
+                <ul id="findingsList"></ul>
+                <p class="disclaimer">Hasil ini berdasarkan indikator heuristik. Bukan jaminan pasti aman atau berbahaya.</p>
+            </div>
+        </section>
+
+        <section id="history" class="history-section">
+            <div class="section-heading">
+                <div>
+                    <h2>Recent Scan History</h2>
+                    <p>Riwayat analisis terbaru Anda.</p>
+                </div>
+                <button class="refresh-button" onclick="loadData()">↻ Refresh</button>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Input</th>
+                            <th>Score</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyBody">
+                        <tr><td colspan="5">Loading history...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <footer>PhishShield AI © 2026 | Cybersecurity Awareness Project</footer>
+    </main>
+</div>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

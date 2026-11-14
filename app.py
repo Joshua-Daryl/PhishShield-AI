@@ -1,0 +1,530 @@
+import os 
+import re
+import sqlite3
+from datetime import datetime
+from functools import wraps
+from urllib.parse import urlparse
+from pathlib import Path
+
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
+
+app = Flask(__name__)
+app.secret_key = "phishshield-secret-key-change-me"
+
+BASE_DIR = Path(__file__).resolve().parent
+
+DATABASE = str(BASE_DIR / "phishshield.db")
+
+# ==========================================
+# DATABASE
+# ==========================================
+
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_type TEXT NOT NULL,
+            input_value TEXT NOT NULL,
+            risk_score INTEGER NOT NULL,
+            risk_level TEXT NOT NULL,
+            findings TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            created_by INTEGER
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('admin', 'user'))
+        )
+    """)
+
+    columns = conn.execute("PRAGMA table_info(scan_history)").fetchall()
+    if not any(column[1] == "created_by" for column in columns):
+        conn.execute("ALTER TABLE scan_history ADD COLUMN created_by INTEGER")
+
+    admin_exists = conn.execute(
+        "SELECT 1 FROM users WHERE username = 'admin'"
+    ).fetchone()
+    if not admin_exists:
+        conn.execute(
+            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+            ("admin", generate_password_hash("admin123"), "admin")
+        )
+
+    user_exists = conn.execute(
+        "SELECT 1 FROM users WHERE username = 'user'"
+    ).fetchone()
+    if not user_exists:
+        conn.execute(
+            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+            ("user", generate_password_hash("user123"), "user")
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def get_current_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+
+    conn = get_db()
+    user = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
+    conn.close()
+    return dict(user) if user else None
+
+
+def require_login(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not session.get("user_id"):
+            return redirect(url_for("login"))
+
+        user = get_current_user()
+        if not user:
+            session.clear()
+            return redirect(url_for("login"))
+
+        return view_func(*args, **kwargs)
+
+    return wrapper
+
+
+def require_role(role):
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(*args, **kwargs):
+            user = get_current_user()
+            if not user:
+                session.clear()
+                return redirect(url_for("login"))
+
+            if user["role"] != role:
+                if user["role"] == "admin":
+                    return redirect(url_for("admin_dashboard"))
+                return redirect(url_for("user_dashboard"))
+
+            return view_func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+# ==========================================
+# PHISHING DETECTION ENGINE
+# ==========================================
+
+def analyze_url(value):
+    value = value.strip()
+
+    if len(value) > 2048:
+        raise ValueError("URL terlalu panjang.")
+
+    if not value:
+        raise ValueError("URL tidak boleh kosong.")
+
+    if not re.match(r"^https?://", value, re.I):
+        raise ValueError("Masukkan URL lengkap dengan http:// atau https://")
+
+    parsed = urlparse(value)
+    host = parsed.hostname
+
+    if not host:
+        raise ValueError("Format URL tidak valid.")
+
+    if parsed.username or parsed.password:
+        raise ValueError("URL dengan informasi login tidak diterima.")
+
+    score = 0
+    findings = []
+
+    def add_finding(points, message):
+        nonlocal score
+        score += points
+        findings.append(message)
+
+    ipv4_pattern = r"^(?:\d{1,3}\.){3}\d{1,3}$"
+    if re.match(ipv4_pattern, host):
+        add_finding(25, "URL menggunakan alamat IP secara langsung.")
+
+    if parsed.scheme != "https":
+        add_finding(10, "URL tidak menggunakan protokol HTTPS.")
+
+    if "@" in value:
+        add_finding(20, "URL mengandung karakter @.")
+
+    if host.startswith("xn--") or ".xn--" in host:
+        add_finding(20, "Domain menggunakan format Punycode.")
+
+    if len(host.split(".")) > 4:
+        add_finding(15, "Domain memiliki jumlah subdomain yang tidak biasa.")
+
+    if len(value) > 100:
+        add_finding(10, "URL memiliki panjang yang tidak biasa.")
+
+    suspicious_words = [
+        "login",
+        "verify",
+        "verification",
+        "password",
+        "account",
+        "secure",
+        "update",
+        "banking",
+        "wallet",
+        "credential",
+        "confirm",
+    ]
+
+    lower_url = value.lower()
+    detected_words = [word for word in suspicious_words if word in lower_url]
+
+    if detected_words:
+        add_finding(
+            min(20, len(detected_words) * 5),
+            "URL mengandung kata yang sering ditemukan pada halaman phishing: "
+            + ", ".join(detected_words),
+        )
+
+    shorteners = ["bit.ly", "tinyurl.com", "t.co", "is.gd", "cutt.ly"]
+    if host.lower() in shorteners:
+        add_finding(15, "URL menggunakan layanan pemendek tautan.")
+
+    return calculate_result(score, findings)
+
+
+def analyze_email(value):
+    value = value.strip()
+
+    if len(value) > 10000:
+        raise ValueError("Teks email terlalu panjang.")
+
+    if not value:
+        raise ValueError("Teks email tidak boleh kosong.")
+
+    score = 0
+    findings = []
+
+    def add_finding(points, message):
+        nonlocal score
+        score += points
+        findings.append(message)
+
+    suspicious_phrases = {
+        "verify your account": 20,
+        "account suspended": 25,
+        "password expired": 20,
+        "click here": 10,
+        "urgent action": 20,
+        "confirm your identity": 20,
+        "claim your prize": 25,
+        "limited time": 10,
+        "unusual activity": 15,
+        "reset your password": 15,
+        "send your password": 30,
+    }
+
+    lower_text = value.lower()
+    for phrase, points in suspicious_phrases.items():
+        if phrase in lower_text:
+            add_finding(points, f"Ditemukan frasa mencurigakan: '{phrase}'.")
+
+    sensitive_words = ["password", "otp", "pin", "credit card", "bank account"]
+    if any(word in lower_text for word in sensitive_words):
+        add_finding(
+            15,
+            "Pesan menyebutkan informasi sensitif seperti password, OTP, PIN, atau data perbankan.",
+        )
+
+    urls = re.findall(r"https?://[^\s<>\"']+", value, re.I)
+    if urls:
+        add_finding(
+            10,
+            f"Pesan mengandung {len(urls)} tautan yang perlu diperiksa lebih lanjut.",
+        )
+
+    urgency_words = [
+        "immediately",
+        "within 24 hours",
+        "right now",
+        "segera",
+        "secepatnya",
+        "sekarang juga",
+    ]
+
+    if any(word in lower_text for word in urgency_words):
+        add_finding(
+            15,
+            "Pesan menggunakan bahasa yang memberikan tekanan atau urgensi.",
+        )
+
+    return calculate_result(score, findings)
+
+
+# ==========================================
+# RISK CALCULATION
+# ==========================================
+
+def calculate_result(score, findings):
+    score = min(score, 100)
+
+    if score >= 50:
+        level = "High Risk"
+    elif score >= 25:
+        level = "Suspicious"
+    else:
+        level = "Safe"
+
+    if not findings:
+        findings.append(
+            "Tidak ditemukan indikator mencurigakan berdasarkan pemeriksaan yang tersedia."
+        )
+
+    return {"score": score, "level": level, "findings": findings}
+
+
+# ==========================================
+# SAVE SCAN HISTORY
+# ==========================================
+
+def save_history(scan_type, input_value, result, user_id=None):
+    conn = get_db()
+
+    conn.execute(
+        """
+        INSERT INTO scan_history (
+            scan_type,
+            input_value,
+            risk_score,
+            risk_level,
+            findings,
+            created_at,
+            created_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scan_type,
+            input_value[:1000],
+            result["score"],
+            result["level"],
+            " | ".join(result["findings"]),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            user_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+# ==========================================
+# AUTH ROUTES
+# ==========================================
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+
+        if not username or not password:
+            return render_template("login.html", error="Username dan password wajib diisi.")
+
+        conn = get_db()
+        user = conn.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (username,)
+        ).fetchone()
+        conn.close()
+
+        if user and check_password_hash(user["password"], password):
+            session.clear()
+            session["user_id"] = user["id"]
+            session["role"] = user["role"]
+            session["username"] = user["username"]
+
+            if user["role"] == "admin":
+                return redirect(url_for("admin_dashboard"))
+            return redirect(url_for("user_dashboard"))
+
+        return render_template("login.html", error="Username atau password salah.")
+
+    return render_template("login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/")
+def index():
+    user = get_current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    if user["role"] == "admin":
+        return redirect(url_for("admin_dashboard"))
+    return redirect(url_for("user_dashboard"))
+
+
+@app.route("/admin")
+@require_role("admin")
+def admin_dashboard():
+    return render_template("admin_dashboard.html", username=session["username"])
+
+
+@app.route("/user")
+@require_role("user")
+def user_dashboard():
+    return render_template("user_dashboard.html", username=session["username"])
+
+
+@app.route("/admin/reset-history", methods=["POST"])
+@require_role("admin")
+def reset_history():
+    conn = get_db()
+    conn.execute("DELETE FROM scan_history")
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "message": "Riwayat scan berhasil direset."})
+
+
+# ==========================================
+# SCAN API
+# ==========================================
+
+@app.route("/api/scan", methods=["POST"])
+def scan():
+    user = get_current_user()
+    if not user:
+        return jsonify({"success": False, "message": "Silakan login terlebih dahulu."}), 401
+
+    data = request.get_json(silent=True) or {}
+    scan_type = data.get("type", "")
+    input_value = data.get("value", "")
+
+    if not isinstance(input_value, str):
+        return jsonify({"success": False, "message": "Input tidak valid."}), 400
+
+    if scan_type not in ["url", "email"]:
+        return jsonify({"success": False, "message": "Jenis pemeriksaan tidak valid."}), 400
+
+    try:
+        if scan_type == "url":
+            result = analyze_url(input_value)
+        else:
+            result = analyze_email(input_value)
+
+        save_history(scan_type, input_value, result, user_id=user["id"])
+
+        return jsonify({"success": True, "result": result})
+
+    except ValueError as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+
+
+# ==========================================
+# HISTORY API
+# ==========================================
+
+@app.route("/api/history")
+def history():
+    user = get_current_user()
+    if not user:
+        return jsonify({"success": False, "message": "Silakan login terlebih dahulu."}), 401
+
+    conn = get_db()
+    query = "SELECT * FROM scan_history"
+    params = []
+
+    if user["role"] == "user":
+        query += " WHERE created_by = ?"
+        params.append(user["id"])
+
+    query += " ORDER BY id DESC LIMIT 20"
+    rows = conn.execute(query, tuple(params)).fetchall()
+    conn.close()
+
+    return jsonify([dict(row) for row in rows])
+
+
+@app.route("/api/stats")
+def stats():
+    user = get_current_user()
+    if not user:
+        return jsonify({"success": False, "message": "Silakan login terlebih dahulu."}), 401
+
+    conn = get_db()
+    query = "SELECT COUNT(*) FROM scan_history"
+    params = []
+    if user["role"] == "user":
+        query += " WHERE created_by = ?"
+        params.append(user["id"])
+
+    total = conn.execute(query, tuple(params)).fetchone()[0]
+
+    high_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'High Risk'"
+    suspicious_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'Suspicious'"
+    safe_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'Safe'"
+
+    if user["role"] == "user":
+        high_query += " AND created_by = ?"
+        suspicious_query += " AND created_by = ?"
+        safe_query += " AND created_by = ?"
+        params = [user["id"]]
+
+    high = conn.execute(high_query, tuple(params)).fetchone()[0]
+    suspicious = conn.execute(suspicious_query, tuple(params)).fetchone()[0]
+    safe = conn.execute(safe_query, tuple(params)).fetchone()[0]
+    conn.close()
+
+    return jsonify({
+        "total": total,
+        "high": high,
+        "suspicious": suspicious,
+        "safe": safe,
+    })
+
+
+# ==========================================
+# RUN APPLICATION
+# ==========================================
+
+init_db()
+
+if __name__ == "__main__":
+    
+    print("===================================")
+    print("       PHISHSHIELD AI")
+    print("===================================")
+
+    port = int(os.environ.get("PORT", 5000))
+
+    print(f"Server running on port {port}")
+
+    app.run(
+        host="127.0.0.1",
+        port=port,
+        debug=False
+    )

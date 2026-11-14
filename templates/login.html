@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhishShield AI - Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="auth-body">
+    <div class="auth-wrapper">
+        <div class="auth-card">
+            <div class="auth-brand">
+                <div class="brand-icon small-brand">
+                    <img src="{{ url_for('static', filename='PhishShield AI Cybersecurity Logo.png') }}" alt="PhishShield AI Logo">
+                </div>
+                <div>
+                    <h1>PhishShield AI</h1>
+                    <p>Secure Access Portal</p>
+                </div>
+            </div>
+
+            {% if error %}
+                <div class="auth-error">{{ error }}</div>
+            {% endif %}
+
+            <form method="POST" action="{{ url_for('login') }}">
+                <label for="username">Username</label>
+                <input id="username" name="username" type="text" placeholder="Masukkan username" required>
+
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" placeholder="Masukkan password" required>
+
+                <button type="submit" class="auth-button">Masuk</button>
+            </form>
+
+            <div class="auth-info">
+                <p>Demo akun:</p>
+                <ul>
+                    <li>Admin: admin / admin123</li>
+                    <li>User: user / user123</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,251 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>PhishShield AI - Security Scanner</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+<div class="layout">
+
+    <aside class="sidebar">
+
+        <div class="brand">
+            <div class="brand-icon">
+                <img src="{{ url_for('static', filename='PhishShield AI Cybersecurity Logo.png') }}"
+                     alt="PhishShield AI Logo">
+            </div>
+            <div class="brand-text">
+                <h2>PhishShield</h2>
+                <span>AI Security</span>
+            </div>
+        </div>
+
+        <p class="menu-label">MAIN MENU</p>
+
+        <a href="#dashboard" class="menu active">▦ Dashboard</a>
+        <a href="#scanner" class="menu">⌕ Scanner</a>
+        <a href="#history" class="menu">◷ Scan History</a>
+
+        <div class="sidebar-bottom">
+            <div class="status">
+                <span class="online"></span>
+                Detection Engine Active
+            </div>
+            <small>PhishShield AI v1.0</small>
+        </div>
+
+    </aside>
+
+
+    <main class="main-content">
+
+        <header class="topbar">
+            <div>
+                <h1>Security Dashboard</h1>
+                <p>Monitor and analyze potential phishing threats.</p>
+            </div>
+
+            <div class="profile">
+                <div class="avatar">PS</div>
+                <span>Security User</span>
+            </div>
+        </header>
+
+
+        <section id="dashboard">
+
+            <div class="welcome">
+                <div>
+                    <span class="eyebrow">CYBERSECURITY PROTECTION</span>
+                    <h2>Welcome to PhishShield AI</h2>
+                    <p>
+                        Protect yourself from suspicious URLs
+                        and phishing messages.
+                    </p>
+                </div>
+                <div class="shield-art">🛡️</div>
+            </div>
+
+
+            <div class="stats-grid">
+
+                <div class="stat-card">
+                    <span>Total Scans</span>
+                    <h2 id="totalScans">0</h2>
+                    <small>All analyzed inputs</small>
+                </div>
+
+                <div class="stat-card">
+                    <span>High Risk</span>
+                    <h2 id="highRisk" class="red">0</h2>
+                    <small>Potential threats</small>
+                </div>
+
+                <div class="stat-card">
+                    <span>Suspicious</span>
+                    <h2 id="suspicious" class="yellow">0</h2>
+                    <small>Need further review</small>
+                </div>
+
+                <div class="stat-card">
+                    <span>Safe</span>
+                    <h2 id="safeScans" class="green">0</h2>
+                    <small>No indicators detected</small>
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <section id="scanner" class="scanner-section">
+
+            <div class="section-heading">
+                <div>
+                    <h2>Threat Scanner</h2>
+                    <p>Choose what you want to analyze.</p>
+                </div>
+            </div>
+
+
+            <div class="scanner-card">
+
+                <div class="tabs">
+                    <button class="tab active"
+                            data-type="url"
+                            onclick="changeType('url')">
+                        🔗 URL Scanner
+                    </button>
+
+                    <button class="tab"
+                            data-type="email"
+                            onclick="changeType('email')">
+                        ✉ Email Scanner
+                    </button>
+                </div>
+
+
+                <div class="input-area">
+
+                    <label id="inputLabel">
+                        Website URL
+                    </label>
+
+                    <textarea
+                        id="scanInput"
+                        placeholder="https://example.com"
+                        rows="4"></textarea>
+
+                    <div class="input-hint" id="inputHint">
+                        Enter the complete URL including https://
+                    </div>
+
+                    <button class="scan-button"
+                            id="scanButton"
+                            onclick="startScan()">
+                        Analyze Threat →
+                    </button>
+
+                </div>
+
+            </div>
+
+
+            <div id="result" class="result-card hidden">
+
+                <div class="result-header">
+                    <div>
+                        <span class="eyebrow">ANALYSIS RESULT</span>
+                        <h2>Scan Completed</h2>
+                    </div>
+                    <span id="riskBadge" class="risk-badge"></span>
+                </div>
+
+                <div class="score-container">
+                    <div class="score-number">
+                        <strong id="riskScore">0</strong>
+                        <span>/ 100</span>
+                    </div>
+
+                    <div class="score-track">
+                        <div id="scoreBar" class="score-fill"></div>
+                    </div>
+                    <small>Risk Score</small>
+                </div>
+
+                <h3>Security Findings</h3>
+
+                <ul id="findingsList"></ul>
+
+                <p class="disclaimer">
+                    This result is based on heuristic indicators.
+                    It does not guarantee that a URL or message
+                    is completely safe or malicious.
+                </p>
+
+            </div>
+
+        </section>
+
+
+        <section id="history" class="history-section">
+
+            <div class="section-heading">
+                <div>
+                    <h2>Recent Scan History</h2>
+                    <p>Your latest security analysis.</p>
+                </div>
+
+                <button class="refresh-button"
+                        onclick="loadData()">
+                    ↻ Refresh
+                </button>
+            </div>
+
+            <div class="table-container">
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Input</th>
+                            <th>Score</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="historyBody">
+                        <tr>
+                            <td colspan="5">Loading history...</td>
+                        </tr>
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+
+        <footer>
+            PhishShield AI © 2026 | Cybersecurity Awareness Project
+        </footer>
+
+    </main>
+
+</div>
+
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+
+</body>
+</html>
