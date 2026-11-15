@@ -13,7 +13,16 @@ try:
 except ImportError:
     pass
 
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -423,6 +432,15 @@ def save_history(scan_type, input_value, result, user_id=None):
         conn.commit()
     finally:
         conn.close()
+
+
+# ==========================================
+# STATIC ASSETS ROUTE (FALLBACK FOR VERCEL)
+# ==========================================
+
+@app.route("/static/<path:filename>")
+def serve_static(filename):
+    return send_from_directory(str(BASE_DIR / "static"), filename)
 
 
 # ==========================================
