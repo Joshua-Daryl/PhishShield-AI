@@ -1,80 +1,121 @@
-import os 
+import os
 import re
 import sqlite3
 from datetime import datetime
 from functools import wraps
-from urllib.parse import urlparse
 from pathlib import Path
+from urllib.parse import urlparse
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
-app.secret_key = "phishshield-secret-key-change-me"
+
+# Handle reverse proxy headers (e.g. Cloudflare, Nginx, cPanel, Heroku, Render)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 BASE_DIR = Path(__file__).resolve().parent
+DATABASE = os.environ.get("DATABASE_PATH", str(BASE_DIR / "phishshield.db"))
 
-DATABASE = str(BASE_DIR / "phishshield.db")
+app.config.update(
+    SECRET_KEY=os.environ.get("SECRET_KEY", "phishshield-secret-key-change-me"),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() in ("true", "1", "yes"),
+    PERMANENT_SESSION_LIFETIME=86400,
+)
+
 
 # ==========================================
 # DATABASE
 # ==========================================
 
 def get_db():
-    conn = sqlite3.connect(DATABASE)
+    db_file = Path(DATABASE)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(DATABASE, timeout=30.0)
     conn.row_factory = sqlite3.Row
+
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+    except Exception:
+        pass
+
     return conn
 
 
 def init_db():
+    db_file = Path(DATABASE)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+
     conn = get_db()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_type TEXT NOT NULL,
+                input_value TEXT NOT NULL,
+                risk_score INTEGER NOT NULL,
+                risk_level TEXT NOT NULL,
+                findings TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by INTEGER
+            )
+        """)
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS scan_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            scan_type TEXT NOT NULL,
-            input_value TEXT NOT NULL,
-            risk_score INTEGER NOT NULL,
-            risk_level TEXT NOT NULL,
-            findings TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            created_by INTEGER
-        )
-    """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('admin', 'user'))
+            )
+        """)
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin', 'user'))
-        )
-    """)
+        # Migration check: make sure created_by column exists
+        columns = [column[1] for column in conn.execute("PRAGMA table_info(scan_history)").fetchall()]
+        if "created_by" not in columns:
+            conn.execute("ALTER TABLE scan_history ADD COLUMN created_by INTEGER")
 
-    columns = conn.execute("PRAGMA table_info(scan_history)").fetchall()
-    if not any(column[1] == "created_by" for column in columns):
-        conn.execute("ALTER TABLE scan_history ADD COLUMN created_by INTEGER")
+        admin_exists = conn.execute(
+            "SELECT 1 FROM users WHERE username = 'admin'"
+        ).fetchone()
+        if not admin_exists:
+            conn.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                ("admin", generate_password_hash("admin123"), "admin")
+            )
 
-    admin_exists = conn.execute(
-        "SELECT 1 FROM users WHERE username = 'admin'"
-    ).fetchone()
-    if not admin_exists:
-        conn.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("admin", generate_password_hash("admin123"), "admin")
-        )
+        user_exists = conn.execute(
+            "SELECT 1 FROM users WHERE username = 'user'"
+        ).fetchone()
+        if not user_exists:
+            conn.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                ("user", generate_password_hash("user123"), "user")
+            )
 
-    user_exists = conn.execute(
-        "SELECT 1 FROM users WHERE username = 'user'"
-    ).fetchone()
-    if not user_exists:
-        conn.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("user", generate_password_hash("user123"), "user")
-        )
+        conn.commit()
+    finally:
+        conn.close()
 
-    conn.commit()
-    conn.close()
+    # Ensure writable permissions on Linux/POSIX hosts
+    if os.name != "nt":
+        try:
+            if os.path.exists(DATABASE):
+                os.chmod(DATABASE, 0o666)
+        except Exception:
+            pass
 
 
 def get_current_user():
@@ -83,12 +124,17 @@ def get_current_user():
         return None
 
     conn = get_db()
-    user = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-    conn.close()
-    return dict(user) if user else None
+    try:
+        user = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+        return dict(user) if user else None
+    except Exception as e:
+        app.logger.error(f"Error fetching current user: {e}")
+        return None
+    finally:
+        conn.close()
 
 
 def require_login(view_func):
@@ -136,7 +182,7 @@ def analyze_url(value):
     value = value.strip()
 
     if len(value) > 2048:
-        raise ValueError("URL terlalu panjang.")
+        raise ValueError("URL terlalu panjang (maksimal 2048 karakter).")
 
     if not value:
         raise ValueError("URL tidak boleh kosong.")
@@ -307,33 +353,33 @@ def calculate_result(score, findings):
 
 def save_history(scan_type, input_value, result, user_id=None):
     conn = get_db()
-
-    conn.execute(
-        """
-        INSERT INTO scan_history (
-            scan_type,
-            input_value,
-            risk_score,
-            risk_level,
-            findings,
-            created_at,
-            created_by
+    try:
+        conn.execute(
+            """
+            INSERT INTO scan_history (
+                scan_type,
+                input_value,
+                risk_score,
+                risk_level,
+                findings,
+                created_at,
+                created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scan_type,
+                input_value[:1000],
+                result["score"],
+                result["level"],
+                " | ".join(result["findings"]),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                user_id,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            scan_type,
-            input_value[:1000],
-            result["score"],
-            result["level"],
-            " | ".join(result["findings"]),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            user_id,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ==========================================
@@ -349,24 +395,30 @@ def login():
         if not username or not password:
             return render_template("login.html", error="Username dan password wajib diisi.")
 
-        conn = get_db()
-        user = conn.execute(
-            "SELECT * FROM users WHERE username = ?",
-            (username,)
-        ).fetchone()
-        conn.close()
+        try:
+            conn = get_db()
+            try:
+                user = conn.execute(
+                    "SELECT * FROM users WHERE username = ?",
+                    (username,)
+                ).fetchone()
+            finally:
+                conn.close()
 
-        if user and check_password_hash(user["password"], password):
-            session.clear()
-            session["user_id"] = user["id"]
-            session["role"] = user["role"]
-            session["username"] = user["username"]
+            if user and check_password_hash(user["password"], password):
+                session.clear()
+                session["user_id"] = user["id"]
+                session["role"] = user["role"]
+                session["username"] = user["username"]
 
-            if user["role"] == "admin":
-                return redirect(url_for("admin_dashboard"))
-            return redirect(url_for("user_dashboard"))
+                if user["role"] == "admin":
+                    return redirect(url_for("admin_dashboard"))
+                return redirect(url_for("user_dashboard"))
 
-        return render_template("login.html", error="Username atau password salah.")
+            return render_template("login.html", error="Username atau password salah.")
+        except Exception as e:
+            app.logger.error(f"Login error: {e}")
+            return render_template("login.html", error=f"Terjadi kesalahan server saat login: {str(e)}")
 
     return render_template("login.html")
 
@@ -391,23 +443,29 @@ def index():
 @app.route("/admin")
 @require_role("admin")
 def admin_dashboard():
-    return render_template("admin_dashboard.html", username=session["username"])
+    return render_template("admin_dashboard.html", username=session.get("username", "admin"))
 
 
 @app.route("/user")
 @require_role("user")
 def user_dashboard():
-    return render_template("user_dashboard.html", username=session["username"])
+    return render_template("user_dashboard.html", username=session.get("username", "user"))
 
 
 @app.route("/admin/reset-history", methods=["POST"])
 @require_role("admin")
 def reset_history():
-    conn = get_db()
-    conn.execute("DELETE FROM scan_history")
-    conn.commit()
-    conn.close()
-    return jsonify({"success": True, "message": "Riwayat scan berhasil direset."})
+    try:
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM scan_history")
+            conn.commit()
+        finally:
+            conn.close()
+        return jsonify({"success": True, "message": "Riwayat scan berhasil direset."})
+    except Exception as e:
+        app.logger.error(f"Gagal mereset history: {e}")
+        return jsonify({"success": False, "message": f"Gagal mereset riwayat: {str(e)}"}), 500
 
 
 # ==========================================
@@ -418,17 +476,21 @@ def reset_history():
 def scan():
     user = get_current_user()
     if not user:
-        return jsonify({"success": False, "message": "Silakan login terlebih dahulu."}), 401
+        return jsonify({"success": False, "message": "Sesi login telah berakhir. Silakan login kembali."}), 401
 
-    data = request.get_json(silent=True) or {}
-    scan_type = data.get("type", "")
+    data = request.get_json(silent=True)
+    if not data and request.form:
+        data = request.form.to_dict()
+    data = data or {}
+
+    scan_type = str(data.get("type", "")).strip().lower()
     input_value = data.get("value", "")
 
-    if not isinstance(input_value, str):
-        return jsonify({"success": False, "message": "Input tidak valid."}), 400
+    if not isinstance(input_value, str) or not input_value.strip():
+        return jsonify({"success": False, "message": "Input pemeriksaan tidak boleh kosong."}), 400
 
     if scan_type not in ["url", "email"]:
-        return jsonify({"success": False, "message": "Jenis pemeriksaan tidak valid."}), 400
+        return jsonify({"success": False, "message": "Jenis pemeriksaan tidak valid (URL atau Email)."}), 400
 
     try:
         if scan_type == "url":
@@ -436,16 +498,23 @@ def scan():
         else:
             result = analyze_email(input_value)
 
-        save_history(scan_type, input_value, result, user_id=user["id"])
+        # Simpan ke riwayat database
+        try:
+            save_history(scan_type, input_value, result, user_id=user["id"])
+        except Exception as db_err:
+            app.logger.warning(f"Gagal mencatat scan ke riwayat database: {db_err}")
 
         return jsonify({"success": True, "result": result})
 
     except ValueError as error:
         return jsonify({"success": False, "message": str(error)}), 400
+    except Exception as error:
+        app.logger.exception(f"Error sistem saat scan: {error}")
+        return jsonify({"success": False, "message": f"Terjadi kesalahan internal server: {str(error)}"}), 500
 
 
 # ==========================================
-# HISTORY API
+# HISTORY & STATS API
 # ==========================================
 
 @app.route("/api/history")
@@ -454,19 +523,24 @@ def history():
     if not user:
         return jsonify({"success": False, "message": "Silakan login terlebih dahulu."}), 401
 
-    conn = get_db()
-    query = "SELECT * FROM scan_history"
-    params = []
+    try:
+        conn = get_db()
+        try:
+            query = "SELECT * FROM scan_history"
+            params = []
 
-    if user["role"] == "user":
-        query += " WHERE created_by = ?"
-        params.append(user["id"])
+            if user["role"] == "user":
+                query += " WHERE created_by = ?"
+                params.append(user["id"])
 
-    query += " ORDER BY id DESC LIMIT 20"
-    rows = conn.execute(query, tuple(params)).fetchall()
-    conn.close()
-
-    return jsonify([dict(row) for row in rows])
+            query += " ORDER BY id DESC LIMIT 20"
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return jsonify([dict(row) for row in rows])
+        finally:
+            conn.close()
+    except Exception as e:
+        app.logger.error(f"Gagal mengambil riwayat scan: {e}")
+        return jsonify([])
 
 
 @app.route("/api/stats")
@@ -475,36 +549,69 @@ def stats():
     if not user:
         return jsonify({"success": False, "message": "Silakan login terlebih dahulu."}), 401
 
-    conn = get_db()
-    query = "SELECT COUNT(*) FROM scan_history"
-    params = []
-    if user["role"] == "user":
-        query += " WHERE created_by = ?"
-        params.append(user["id"])
+    try:
+        conn = get_db()
+        try:
+            query = "SELECT COUNT(*) FROM scan_history"
+            params = []
+            if user["role"] == "user":
+                query += " WHERE created_by = ?"
+                params.append(user["id"])
 
-    total = conn.execute(query, tuple(params)).fetchone()[0]
+            total = conn.execute(query, tuple(params)).fetchone()[0]
 
-    high_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'High Risk'"
-    suspicious_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'Suspicious'"
-    safe_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'Safe'"
+            high_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'High Risk'"
+            suspicious_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'Suspicious'"
+            safe_query = "SELECT COUNT(*) FROM scan_history WHERE risk_level = 'Safe'"
 
-    if user["role"] == "user":
-        high_query += " AND created_by = ?"
-        suspicious_query += " AND created_by = ?"
-        safe_query += " AND created_by = ?"
-        params = [user["id"]]
+            if user["role"] == "user":
+                high_query += " AND created_by = ?"
+                suspicious_query += " AND created_by = ?"
+                safe_query += " AND created_by = ?"
+                params = [user["id"]]
 
-    high = conn.execute(high_query, tuple(params)).fetchone()[0]
-    suspicious = conn.execute(suspicious_query, tuple(params)).fetchone()[0]
-    safe = conn.execute(safe_query, tuple(params)).fetchone()[0]
-    conn.close()
+            high = conn.execute(high_query, tuple(params)).fetchone()[0]
+            suspicious = conn.execute(suspicious_query, tuple(params)).fetchone()[0]
+            safe = conn.execute(safe_query, tuple(params)).fetchone()[0]
 
+            return jsonify({
+                "total": total,
+                "high": high,
+                "suspicious": suspicious,
+                "safe": safe,
+            })
+        finally:
+            conn.close()
+    except Exception as e:
+        app.logger.error(f"Gagal mengambil statistik: {e}")
+        return jsonify({"total": 0, "high": 0, "suspicious": 0, "safe": 0})
+
+
+@app.route("/health")
+def health():
     return jsonify({
-        "total": total,
-        "high": high,
-        "suspicious": suspicious,
-        "safe": safe,
-    })
+        "status": "ok",
+        "service": "PhishShield AI",
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }), 200
+
+
+# ==========================================
+# GLOBAL ERROR HANDLERS (ALWAYS RETURN JSON FOR API)
+# ==========================================
+
+@app.errorhandler(400)
+@app.errorhandler(401)
+@app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(405)
+@app.errorhandler(500)
+def handle_http_errors(error):
+    if request.path.startswith("/api/") or request.path.startswith("/admin/reset-history") or request.is_json:
+        code = getattr(error, "code", 500)
+        description = getattr(error, "description", "Terjadi kesalahan pada server.")
+        return jsonify({"success": False, "message": description}), code
+    return error
 
 
 # ==========================================
@@ -514,17 +621,13 @@ def stats():
 init_db()
 
 if __name__ == "__main__":
-    
+    port = int(os.environ.get("PORT", 5000))
+    host = os.environ.get("HOST", "0.0.0.0")
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() in ("true", "1", "yes")
+
     print("===================================")
     print("       PHISHSHIELD AI")
     print("===================================")
+    print(f"Server running on http://{host}:{port}")
 
-    port = int(os.environ.get("PORT", 5000))
-
-    print(f"Server running on port {port}")
-
-    app.run(
-        host="127.0.0.1",
-        port=port,
-        debug=False
-    )
+    app.run(host=host, port=port, debug=debug)

@@ -186,7 +186,14 @@
 
                 try {
                     const response = await fetch('/admin/reset-history', { method: 'POST' });
-                    const data = await response.json();
+                    const contentType = response.headers.get('content-type') || '';
+                    let data;
+                    if (contentType.includes('application/json')) {
+                        data = await response.json();
+                    } else {
+                        throw new Error(`Server error (${response.status}): Gagal memproses permintaan.`);
+                    }
+
                     if (!response.ok || !data.success) {
                         throw new Error(data.message || 'Gagal reset history');
                     }
