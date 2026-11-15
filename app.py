@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import sqlite3
 from datetime import datetime
 from functools import wraps
@@ -16,13 +17,17 @@ from flask import Flask, jsonify, redirect, render_template, request, session, u
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
-app = Flask(__name__)
-
-# Handle reverse proxy headers (e.g. Cloudflare, Nginx, cPanel, Heroku, Render)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-
 BASE_DIR = Path(__file__).resolve().parent
-DATABASE = os.environ.get("DATABASE_PATH", str(BASE_DIR / "phishshield.db"))
+
+# Inisialisasi Flask dengan path absolut agar Vercel & serverless dapat menemukan template & static
+app = Flask(
+    __name__,
+    template_folder=str(BASE_DIR / "templates"),
+    static_folder=str(BASE_DIR / "static"),
+)
+
+# Handle reverse proxy headers (Cloudflare, Vercel, Nginx, cPanel)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 app.config.update(
     SECRET_KEY=os.environ.get("SECRET_KEY", "phishshield-secret-key-change-me"),
@@ -34,18 +39,54 @@ app.config.update(
 
 
 # ==========================================
-# DATABASE
+# DATABASE HELPER (SUPPORTS VERCEL SERVERLESS)
 # ==========================================
 
+def get_database_path():
+    is_serverless = bool(
+        os.environ.get("VERCEL")
+        or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    )
+
+    if not is_serverless:
+        # Periksa apakah direktori root memiliki izin tulis
+        try:
+            test_file = BASE_DIR / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+        except Exception:
+            is_serverless = True
+
+    if is_serverless:
+        # Vercel serverless hanya mengizinkan tulis di /tmp
+        tmp_db = Path("/tmp/phishshield.db")
+        seed_db = BASE_DIR / "phishshield.db"
+        if not tmp_db.exists() and seed_db.exists():
+            try:
+                shutil.copyfile(seed_db, tmp_db)
+            except Exception as e:
+                app.logger.warning(f"Gagal menyalin seed db ke /tmp: {e}")
+        return str(tmp_db)
+
+    return os.environ.get("DATABASE_PATH", str(BASE_DIR / "phishshield.db"))
+
+
+DATABASE = get_database_path()
+
+
 def get_db():
-    db_file = Path(DATABASE)
+    current_db = get_database_path()
+    db_file = Path(current_db)
     db_file.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(DATABASE, timeout=30.0)
+    conn = sqlite3.connect(current_db, timeout=30.0)
     conn.row_factory = sqlite3.Row
 
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        if os.environ.get("VERCEL"):
+            conn.execute("PRAGMA journal_mode=MEMORY;")
+        else:
+            conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("PRAGMA foreign_keys=ON;")
     except Exception:
@@ -55,67 +96,68 @@ def get_db():
 
 
 def init_db():
-    db_file = Path(DATABASE)
-    db_file.parent.mkdir(parents=True, exist_ok=True)
-
-    conn = get_db()
     try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS scan_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                scan_type TEXT NOT NULL,
-                input_value TEXT NOT NULL,
-                risk_score INTEGER NOT NULL,
-                risk_level TEXT NOT NULL,
-                findings TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                created_by INTEGER
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password TEXT NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('admin', 'user'))
-            )
-        """)
-
-        # Migration check: make sure created_by column exists
-        columns = [column[1] for column in conn.execute("PRAGMA table_info(scan_history)").fetchall()]
-        if "created_by" not in columns:
-            conn.execute("ALTER TABLE scan_history ADD COLUMN created_by INTEGER")
-
-        admin_exists = conn.execute(
-            "SELECT 1 FROM users WHERE username = 'admin'"
-        ).fetchone()
-        if not admin_exists:
-            conn.execute(
-                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                ("admin", generate_password_hash("admin123"), "admin")
-            )
-
-        user_exists = conn.execute(
-            "SELECT 1 FROM users WHERE username = 'user'"
-        ).fetchone()
-        if not user_exists:
-            conn.execute(
-                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                ("user", generate_password_hash("user123"), "user")
-            )
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    # Ensure writable permissions on Linux/POSIX hosts
-    if os.name != "nt":
+        conn = get_db()
         try:
-            if os.path.exists(DATABASE):
-                os.chmod(DATABASE, 0o666)
-        except Exception:
-            pass
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_type TEXT NOT NULL,
+                    input_value TEXT NOT NULL,
+                    risk_score INTEGER NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    findings TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    created_by INTEGER
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('admin', 'user'))
+                )
+            """)
+
+            # Migration check: make sure created_by column exists
+            columns = [column[1] for column in conn.execute("PRAGMA table_info(scan_history)").fetchall()]
+            if "created_by" not in columns:
+                conn.execute("ALTER TABLE scan_history ADD COLUMN created_by INTEGER")
+
+            admin_exists = conn.execute(
+                "SELECT 1 FROM users WHERE username = 'admin'"
+            ).fetchone()
+            if not admin_exists:
+                conn.execute(
+                    "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                    ("admin", generate_password_hash("admin123"), "admin")
+                )
+
+            user_exists = conn.execute(
+                "SELECT 1 FROM users WHERE username = 'user'"
+            ).fetchone()
+            if not user_exists:
+                conn.execute(
+                    "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                    ("user", generate_password_hash("user123"), "user")
+                )
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Set permission jika di lingkungan Linux biasa (bukan serverless)
+        if os.name != "nt" and not os.environ.get("VERCEL"):
+            try:
+                target_db = get_database_path()
+                if os.path.exists(target_db):
+                    os.chmod(target_db, 0o666)
+            except Exception:
+                pass
+    except Exception as e:
+        app.logger.warning(f"Peringatan init_db: {e}")
 
 
 def get_current_user():
@@ -123,18 +165,19 @@ def get_current_user():
     if not user_id:
         return None
 
-    conn = get_db()
     try:
-        user = conn.execute(
-            "SELECT * FROM users WHERE id = ?",
-            (user_id,)
-        ).fetchone()
-        return dict(user) if user else None
+        conn = get_db()
+        try:
+            user = conn.execute(
+                "SELECT * FROM users WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+            return dict(user) if user else None
+        finally:
+            conn.close()
     except Exception as e:
-        app.logger.error(f"Error fetching current user: {e}")
+        app.logger.error(f"Error mengambil user login: {e}")
         return None
-    finally:
-        conn.close()
 
 
 def require_login(view_func):
@@ -614,10 +657,7 @@ def handle_http_errors(error):
     return error
 
 
-# ==========================================
-# RUN APPLICATION
-# ==========================================
-
+# Inisialisasi database awal
 init_db()
 
 if __name__ == "__main__":
